@@ -1,0 +1,6 @@
+{
+  "name": "Quản Lý Chi Tiêu Cá Nhân",
+  "description": "Ứng dụng theo dõi, thống kê chi tiêu cá nhân và đồng bộ dữ liệu trực tiếp lên mẫu Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
