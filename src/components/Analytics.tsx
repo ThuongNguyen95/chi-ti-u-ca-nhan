@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Transaction } from '../types';
 import { PieChart, TrendingUp, TrendingDown, Wallet, Sparkles } from 'lucide-react';
 
@@ -12,12 +12,19 @@ interface AnalyticsProps {
 }
 
 export default function Analytics({ transactions }: AnalyticsProps) {
+  const [activeCurrency, setActiveCurrency] = useState<'VND' | 'INR'>('VND');
+
+  // Filter transactions based on active currency
+  const filteredTransactions = useMemo(() => {
+    return transactions.filter((t) => (t.currency || 'VND') === activeCurrency);
+  }, [transactions, activeCurrency]);
+
   // Aggregate statistics
   const stats = useMemo(() => {
     let income = 0;
     let expense = 0;
 
-    transactions.forEach((t) => {
+    filteredTransactions.forEach((t) => {
       if (t.type === 'income') {
         income += t.amount;
       } else {
@@ -29,14 +36,14 @@ export default function Analytics({ transactions }: AnalyticsProps) {
     const savingsRate = income > 0 ? Math.max(0, Math.round((net / income) * 100)) : 0;
 
     return { income, expense, net, savingsRate };
-  }, [transactions]);
+  }, [filteredTransactions]);
 
   // Aggregate expenditures by category
   const categoryExpenses = useMemo(() => {
     const categories: Record<string, number> = {};
     let totalExpense = 0;
 
-    transactions.forEach((t) => {
+    filteredTransactions.forEach((t) => {
       if (t.type === 'expense') {
         categories[t.category] = (categories[t.category] || 0) + t.amount;
         totalExpense += t.amount;
@@ -50,7 +57,7 @@ export default function Analytics({ transactions }: AnalyticsProps) {
         percentage: totalExpense > 0 ? Math.round((amount / totalExpense) * 100) : 0,
       }))
       .sort((a, b) => b.amount - a.amount);
-  }, [transactions]);
+  }, [filteredTransactions]);
 
   // Beautiful SVG pie chart calculations
   const pieChartPaths = useMemo(() => {
@@ -113,27 +120,63 @@ export default function Analytics({ transactions }: AnalyticsProps) {
     });
   }, [categoryExpenses]);
 
-  // Format money VND
-  const formatVND = (num: number) => {
-    return new Intl.NumberFormat('vi-VN', {
-      style: 'currency',
-      currency: 'VND',
-    }).format(num);
+  // Format currency dynamically
+  const formatCurrency = (num: number) => {
+    if (activeCurrency === 'INR') {
+      return new Intl.NumberFormat('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        maximumFractionDigits: 2,
+      }).format(num);
+    } else {
+      return new Intl.NumberFormat('vi-VN', {
+        style: 'currency',
+        currency: 'VND',
+        maximumFractionDigits: 0,
+      }).format(num).replace(/₫/g, 'đ');
+    }
   };
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-6 space-y-6" id="analytics-section">
-      <div className="flex items-center justify-between">
-        <h3 className="font-sans font-semibold text-lg text-gray-900 tracking-tight flex items-center gap-2">
-          <PieChart className="w-5 h-5 text-emerald-600" />
-          Phân tích & Thống kê tài chính
-        </h3>
-        {stats.savingsRate >= 30 && (
-          <div className="bg-emerald-50 text-emerald-600 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1">
-            <Sparkles className="w-3 h-3" />
-            Tiết kiệm tốt: {stats.savingsRate}%
-          </div>
-        )}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center justify-between w-full sm:w-auto gap-4">
+          <h3 className="font-sans font-semibold text-lg text-gray-900 tracking-tight flex items-center gap-2">
+            <PieChart className="w-5 h-5 text-emerald-600" />
+            Phân tích & Thống kê tài chính
+          </h3>
+          {stats.savingsRate >= 30 && (
+            <div className="bg-emerald-50 text-emerald-600 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1 animate-fade-in flex-shrink-0">
+              <Sparkles className="w-3 h-3" />
+              Tiết kiệm tốt: {stats.savingsRate}%
+            </div>
+          )}
+        </div>
+        
+        <div className="flex bg-gray-50 p-1 rounded-xl border border-gray-150 text-xs font-semibold self-start">
+          <button
+            type="button"
+            onClick={() => setActiveCurrency('VND')}
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+              activeCurrency === 'VND'
+                ? 'bg-emerald-600 text-white shadow-2xs'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            VND đ
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveCurrency('INR')}
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+              activeCurrency === 'INR'
+                ? 'bg-emerald-600 text-white shadow-2xs'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            INR ₹
+          </button>
+        </div>
       </div>
 
       {/* Grid summarizing Financial Metrics */}
@@ -145,7 +188,7 @@ export default function Analytics({ transactions }: AnalyticsProps) {
             Tổng Thu Nhập
           </div>
           <p className="mt-2 text-lg font-mono font-bold text-emerald-700 tracking-tight">
-            {formatVND(stats.income)}
+            {formatCurrency(stats.income)}
           </p>
         </div>
 
@@ -156,7 +199,7 @@ export default function Analytics({ transactions }: AnalyticsProps) {
             Tổng Chi Tiêu
           </div>
           <p className="mt-2 text-lg font-mono font-bold text-red-600 tracking-tight">
-            {formatVND(stats.expense)}
+            {formatCurrency(stats.expense)}
           </p>
         </div>
 
@@ -171,7 +214,7 @@ export default function Analytics({ transactions }: AnalyticsProps) {
             Tài Khoản Hiện Có
           </div>
           <p className="mt-2 text-lg font-mono font-bold tracking-tight">
-            {formatVND(stats.net)}
+            {formatCurrency(stats.net)}
           </p>
         </div>
       </div>
@@ -220,7 +263,7 @@ export default function Analytics({ transactions }: AnalyticsProps) {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-gray-400 font-medium">{item.percentage}%</span>
-                    <span className="font-mono text-gray-600 font-medium">{formatVND(item.amount)}</span>
+                    <span className="font-mono text-gray-600 font-medium">{formatCurrency(item.amount)}</span>
                   </div>
                 </div>
               ))}

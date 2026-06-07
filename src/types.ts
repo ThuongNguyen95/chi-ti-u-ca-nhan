@@ -8,10 +8,12 @@ export interface Transaction {
   date: string; // YYYY-MM-DD
   type: 'income' | 'expense';
   amount: number;
+  currency?: 'VND' | 'INR';
   category: string;
   note: string;
   wallet: string;
   synced: boolean;
+  rawDateTime?: string; // Original, untampered Google Sheets date/time value (keeps formatting intact)
 }
 
 export interface SheetConfig {
@@ -29,6 +31,8 @@ export interface SheetConfig {
     wallet_to: string;   // e.g., "H" (Tiền đến)
   };
   hasHeaders: boolean;
+  transactionStartRow?: number; // Row index where transacton records start (e.g., 6)
+  autoSync?: boolean;
 }
 
 export const CATEGORIES_EXPENSE = [

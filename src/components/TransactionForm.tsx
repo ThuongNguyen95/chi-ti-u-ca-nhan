@@ -14,6 +14,7 @@ interface TransactionFormProps {
 export default function TransactionForm({ onAddTransaction }: TransactionFormProps) {
   const [type, setType] = useState<'expense' | 'income'>('expense');
   const [amountInput, setAmountInput] = useState<string>('');
+  const [currency, setCurrency] = useState<'VND' | 'INR'>('VND');
   const [category, setCategory] = useState<string>('');
   const [wallet, setWallet] = useState<string>('');
   const [date, setDate] = useState<string>('');
@@ -38,11 +39,15 @@ export default function TransactionForm({ onAddTransaction }: TransactionFormPro
     setCategory(list[0]);
   }, [type]);
 
-  // Format money for VND visual guidance
-  const formatVND = (value: string) => {
+  // Format money for visual guidance (VND or INR)
+  const formatAmount = (value: string, cur: 'VND' | 'INR' = 'VND') => {
     const numeric = value.replace(/\D/g, '');
     if (!numeric) return '';
-    return new Intl.NumberFormat('vi-VN').format(parseInt(numeric, 10));
+    if (cur === 'INR') {
+      return new Intl.NumberFormat('en-IN').format(parseInt(numeric, 10));
+    } else {
+      return new Intl.NumberFormat('vi-VN').format(parseInt(numeric, 10));
+    }
   };
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -56,7 +61,7 @@ export default function TransactionForm({ onAddTransaction }: TransactionFormPro
 
     const parsedAmount = parseInt(amountInput, 10);
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      setErrorMsg('Vui lòng nhập số tiền hợp lệ lớn hơn 0 ₫');
+      setErrorMsg(`Vui lòng nhập số tiền hợp lệ lớn hơn 0 ${currency === 'INR' ? '₹' : 'đ'}`);
       return;
     }
 
@@ -69,6 +74,7 @@ export default function TransactionForm({ onAddTransaction }: TransactionFormPro
       date,
       type,
       amount: parsedAmount,
+      currency,
       category,
       note: note.trim(),
       wallet
@@ -126,17 +132,43 @@ export default function TransactionForm({ onAddTransaction }: TransactionFormPro
 
         {/* Amount Input */}
         <div>
-          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
-            Số tiền (VND)
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              Số tiền ({currency})
+            </label>
+            <div className="flex bg-gray-100 p-0.5 rounded-lg border border-gray-150 text-[10px] font-bold">
+              <button
+                type="button"
+                onClick={() => setCurrency('VND')}
+                className={`px-2.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                  currency === 'VND'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-gray-500 hover:text-gray-900'
+                }`}
+              >
+                VND (đ)
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrency('INR')}
+                className={`px-2.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                  currency === 'INR'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-gray-500 hover:text-gray-900'
+                }`}
+              >
+                INR (₹)
+              </button>
+            </div>
+          </div>
           <div className="relative group">
             <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400">
-              <span className="text-sm font-semibold">₫</span>
+              <span className="text-sm font-semibold">{currency === 'INR' ? '₹' : 'đ'}</span>
             </div>
             <input
               type="text"
               id="tx-amount-input"
-              value={formatVND(amountInput)}
+              value={formatAmount(amountInput, currency)}
               onChange={handleAmountChange}
               placeholder="0"
               className="w-full pl-8 pr-12 py-3 bg-gray-50 focus:bg-white text-gray-900 font-mono text-xl font-bold rounded-xl border border-gray-100 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-50 focus:outline-hidden transition-all placeholder:text-gray-300"
@@ -144,14 +176,14 @@ export default function TransactionForm({ onAddTransaction }: TransactionFormPro
               required
             />
             {amountInput && (
-              <span className="absolute inset-y-0 right-0 pr-4 flex items-center text-xs font-semibold text-gray-400 font-mono">
-                VND
+              <span className="absolute inset-y-0 right-0 pr-4 flex items-center text-xs font-semibold text-gray-400 font-mono animate-fade-in">
+                {currency}
               </span>
             )}
           </div>
           {amountInput && (
             <div className="mt-1 text-xs text-gray-400 italic">
-              Bằng chữ: <span className="font-medium text-emerald-600">{formatVND(amountInput)} đồng</span>
+              Bằng chữ: <span className="font-medium text-emerald-600">{formatAmount(amountInput, currency)} {currency === 'INR' ? 'Rupees' : 'đồng'}</span>
             </div>
           )}
         </div>

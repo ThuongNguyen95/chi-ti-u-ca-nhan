@@ -5,23 +5,32 @@
 
 import React, { useState, useEffect } from 'react';
 import { SheetConfig, Transaction } from '../types';
-import { fetchUserProfile, appendTransactionsToSheet, getSheetMetaData, UserProfile } from '../utils/googleSheets';
-import { Cloud, Lock, ShieldCheck, Check, LogOut, Settings2, HelpCircle, ToggleLeft, Copy, Sliders } from 'lucide-react';
+import { fetchUserProfile, appendTransactionsToSheet, getSheetMetaData, fetchTransactionsFromSheet, UserProfile, overwriteSheetWithTransactions } from '../utils/googleSheets';
+import { Cloud, Lock, ShieldCheck, Check, LogOut, Settings2, HelpCircle, ToggleLeft, Copy, Sliders, RefreshCw } from 'lucide-react';
 
 interface SheetsSyncProps {
   config: SheetConfig;
   onChangeConfig: (newConfig: SheetConfig) => void;
+  transactions: Transaction[];
   unsyncedTransactions: Transaction[];
   onMarkTransactionsSynced: (ids: string[]) => void;
+  accessToken: string;
+  setAccessToken: (token: string) => void;
+  onImportTransactions: (imported: Transaction[]) => number;
+  onTwoWaySync: (localList?: Transaction[]) => Promise<Transaction[]>;
 }
 
 export default function SheetsSync({
   config,
   onChangeConfig,
+  transactions,
   unsyncedTransactions,
   onMarkTransactionsSynced,
+  accessToken,
+  setAccessToken,
+  onImportTransactions,
+  onTwoWaySync,
 }: SheetsSyncProps) {
-  const [accessToken, setAccessToken] = useState<string>(() => localStorage.getItem('gs_access_token') || '');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [syncMessage, setSyncMessage] = useState<{ type: 'success' | 'err'; text: string } | null>(null);
@@ -225,15 +234,10 @@ export default function SheetsSync({
     }
   };
 
-  // Triggers Append of local unsynced entries
+  // Triggers complete overwrite of sheet to align with app state (vital for updating or deleting records)
   const handleSyncToSheets = async () => {
     if (!accessToken) {
       setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản Google trước' });
-      return;
-    }
-
-    if (unsyncedTransactions.length === 0) {
-      setSyncMessage({ type: 'success', text: 'Tất cả chi tiêu của bạn đã được đồng bộ hóa!' });
       return;
     }
 
@@ -244,21 +248,45 @@ export default function SheetsSync({
       // First, fetch structure to confirm access
       await getSheetMetaData(accessToken, config);
 
-      // Save transactions online
-      const result = await appendTransactionsToSheet(accessToken, config, unsyncedTransactions);
-      if (result.success) {
-        const syncedIds = unsyncedTransactions.map((t) => t.id);
-        onMarkTransactionsSynced(syncedIds);
-        setSyncMessage({
-          type: 'success',
-          text: `Đồng bộ thành công ${result.appendedCount} giao dịch sang trang tính!`,
-        });
-      }
+      // Save transactions online by pulling and merging first, then overwriting for perfect sync of deletions/edits/additions
+      const syncedList = await onTwoWaySync();
+      setSyncMessage({
+        type: 'success',
+        text: `Đồng bộ hai chiều hoàn tất thành công! Toàn bộ ${syncedList.length} giao dịch hiện đã khớp dữ liệu và được bảo toàn 100% trên cả thiết bị và bản gốc Google Sheets.`,
+      });
     } catch (error: any) {
       console.error('Sync failed:', error);
       setSyncMessage({
         type: 'err',
         text: error.message || 'Lỗi đồng bộ. Hãy kiểm tra cài đặt chia sẻ hoặc hết hạn Token.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Triggers Pull and Import from Sheets
+  const handlePullFromSheets = async () => {
+    if (!accessToken) {
+      setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản Google trước' });
+      return;
+    }
+
+    setIsLoading(true);
+    setSyncMessage(null);
+
+    try {
+      const fetched = await fetchTransactionsFromSheet(accessToken, config);
+      const addedCount = onImportTransactions(fetched);
+      setSyncMessage({
+        type: 'success',
+        text: `Đã tải đồng bộ thành công ${addedCount} giao dịch từ Google Sheets về ứng dụng. Toàn bộ dữ liệu cục bộ đã được cập nhật chính xác tuyệt đối theo file file Google Sheets gốc của bạn!`,
+      });
+    } catch (error: any) {
+      console.error('Pull failed:', error);
+      setSyncMessage({
+        type: 'err',
+        text: error.message || 'Lỗi tải dữ liệu. Hãy kiểm tra cài đặt chia sẻ hoặc hết hạn Token.',
       });
     } finally {
       setIsLoading(false);
@@ -322,53 +350,87 @@ export default function SheetsSync({
           </button>
         </div>
       ) : (
-        <div className="bg-emerald-50/20 p-4 rounded-xl border border-emerald-50 relative flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div className="flex items-center gap-3">
-            {userProfile?.picture ? (
-              <img
-                src={userProfile.picture}
-                alt="Avatar"
-                className="w-10 h-10 rounded-full border border-emerald-400 object-cover"
-                referrerPolicy="no-referrer"
-              />
-            ) : (
-              <div className="w-10 h-10 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center font-bold text-sm border border-emerald-300">
-                G
+        <div className="space-y-4">
+          <div className="bg-emerald-50/20 p-4 rounded-xl border border-emerald-50 relative flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {userProfile?.picture ? (
+                <img
+                  src={userProfile.picture}
+                  alt="Avatar"
+                  className="w-10 h-10 rounded-full border border-emerald-400 object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="w-10 h-10 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center font-bold text-sm border border-emerald-300">
+                  G
+                </div>
+              )}
+              <div>
+                <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
+                  Đã kết nối
+                </span>
+                <h4 className="text-sm font-semibold text-gray-900 leading-tight">
+                  {userProfile?.name || 'Tài khoản Google'}
+                </h4>
+                <p className="text-xs text-gray-500 font-medium font-mono">{userProfile?.email}</p>
               </div>
-            )}
-            <div>
-              <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
-                Đã kết nối
-              </span>
-              <h4 className="text-sm font-semibold text-gray-900 leading-tight">
-                {userProfile?.name || 'Tài khoản Google'}
-              </h4>
-              <p className="text-xs text-gray-500 font-medium font-mono">{userProfile?.email}</p>
+            </div>
+
+            <div className="flex gap-2 self-start sm:self-center">
+              <button
+                onClick={handleSyncToSheets}
+                disabled={isLoading}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                {isLoading ? (
+                  'Đang đồng bộ...'
+                ) : (
+                  <>
+                    <Cloud className="w-3.5 h-3.5" />
+                    Đồng bộ ngay ({unsyncedTransactions.length})
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handlePullFromSheets}
+                disabled={isLoading}
+                className="bg-white hover:bg-gray-50 text-gray-700 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-150 transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                title="Tải tất cả các dòng chi tiêu từ Google Sheets về ứng dụng"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-emerald-600" />
+                Tải về từ Sheets
+              </button>
+              <button
+                onClick={handleLogout}
+                className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 border border-gray-100 bg-white rounded-lg transition-all cursor-pointer"
+                title="Đăng xuất"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
-          <div className="flex gap-2 self-start sm:self-center">
-            <button
-              onClick={handleSyncToSheets}
-              disabled={isLoading}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
-            >
-              {isLoading ? (
-                'Đang đồng bộ...'
-              ) : (
-                <>
-                  <Cloud className="w-3.5 h-3.5" />
-                  Đồng bộ ngay ({unsyncedTransactions.length})
-                </>
-              )}
-            </button>
-            <button
-              onClick={handleLogout}
-              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 border border-gray-100 bg-white rounded-lg transition-all cursor-pointer"
-              title="Đăng xuất"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </button>
+          {/* Chế độ đồng bộ tự động toggle options */}
+          <div className="bg-gray-50/50 p-3.5 rounded-xl border border-gray-150 flex items-center justify-between gap-4">
+            <div className="flex items-start gap-2.5">
+              <input
+                type="checkbox"
+                id="auto-sync-checkbox"
+                checked={!!config.autoSync}
+                onChange={(e) => onChangeConfig({ ...config, autoSync: e.target.checked })}
+                className="w-4 h-4 mt-0.5 text-emerald-600 focus:ring-emerald-500 border-gray-300 rounded cursor-pointer accent-emerald-600"
+              />
+              <label htmlFor="auto-sync-checkbox" className="cursor-pointer select-none">
+                <span className="text-xs font-semibold text-gray-800 block">Kích hoạt chế độ đồng bộ tự động (Auto Sync)</span>
+                <span className="text-[10px] text-gray-400 font-medium leading-tight">
+                  Tự động đẩy chi tiêu mới lên Google Sheets khi thêm và luôn đồng bộ hai chiều ngầm mỗi phút.
+                </span>
+              </label>
+            </div>
+            <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${config.autoSync ? 'bg-emerald-400' : 'bg-gray-300'}`}></span>
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${config.autoSync ? 'bg-emerald-500' : 'bg-gray-400'}`}></span>
+            </span>
           </div>
         </div>
       )}
@@ -396,7 +458,7 @@ export default function SheetsSync({
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-1">
                   Sheet Tab Name
@@ -407,6 +469,20 @@ export default function SheetsSync({
                   onChange={(e) => onChangeConfig({ ...config, sheetName: e.target.value })}
                   placeholder="Sheet1"
                   className="w-full bg-white px-3 py-2 text-xs rounded-lg border border-gray-150 focus:border-emerald-500 focus:outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-1 truncate" title="Dòng bắt đầu ghi dữ liệu">
+                  Dòng bắt đầu ghi
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={config.transactionStartRow || 6}
+                  onChange={(e) => onChangeConfig({ ...config, transactionStartRow: parseInt(e.target.value, 10) || 6 })}
+                  placeholder="6"
+                  className="w-full bg-white px-3 py-2 text-xs rounded-lg border border-gray-150 focus:border-emerald-500 focus:outline-hidden font-mono font-bold text-emerald-600"
                 />
               </div>
 
@@ -466,24 +542,24 @@ export default function SheetsSync({
           <form onSubmit={handleManualTokenSubmit} className="border-t border-gray-150 pt-3 space-y-2">
             <div>
               <span className="block text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">
-                Lối tắt: Dùng Access Token trực tiếp
+                Lối tắt: Dùng Access Token trực tiếp (Khuyên dùng khi lỗi 401: invalid_client)
               </span>
-              <p className="text-[10px] text-gray-400 leading-normal mb-2">
-                Để thử nghiệm nhanh mà không cần tạo Client ID, hãy lấy Access Token từ{' '}
-                <a
+              <p className="text-[10px] text-gray-400 leading-normal mb-2 font-medium">
+                ⚠️ Nếu bạn gặp lỗi <strong className="text-amber-700">Lỗi 401: invalid_client</strong> khi nhấn kết nối hoặc không có Client ID riêng, hãy sử dụng lối tắt này. Rất nhanh và không cần cấu hình phức tạp:
+                <br />
+                Mở <a
                   href="https://developers.google.com/oauthplayground"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-emerald-600 hover:underline font-semibold"
+                  className="text-emerald-600 hover:underline font-bold"
                 >
                   OAuth Playground
-                </a>{' '}
-                với phạm vi `https://www.googleapis.com/auth/spreadsheets` rồi dán xuống đây.
+                </a>, nhập scope <code className="bg-gray-100 px-1 py-0.5 rounded text-[9px] font-mono text-gray-700">https://www.googleapis.com/auth/spreadsheets</code> ở danh sách bên trái, nhấp <strong>Authorize APIs</strong> và cấp quyền, sau đó dán mã Access Token nhận được vào đây.
               </p>
               <div className="flex gap-2">
                 <input
-                  type="password"
-                  placeholder="Paste Access Token..."
+                  type="text"
+                  placeholder="Ya29.a0Ax..."
                   value={manualToken}
                   onChange={(e) => setManualToken(e.target.value)}
                   className="flex-1 bg-white px-3 py-2 text-xs rounded-lg border border-gray-150 focus:border-emerald-500 focus:outline-hidden font-mono"

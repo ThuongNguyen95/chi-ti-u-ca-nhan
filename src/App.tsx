@@ -9,7 +9,9 @@ import TransactionForm from './components/TransactionForm';
 import TransactionsList from './components/TransactionsList';
 import Analytics from './components/Analytics';
 import SheetsSync from './components/SheetsSync';
+import SavingsManager from './components/SavingsManager';
 import { Wallet, Cloud, BookOpen, Trash2, ShieldCheck, RefreshCw, Smartphone, Sparkles } from 'lucide-react';
+import { appendTransactionsToSheet, fetchTransactionsFromSheet, overwriteSheetWithTransactions } from './utils/googleSheets';
 
 const LOCAL_STORAGE_KEY = 'v_personal_expenses';
 const CONFIG_STORAGE_KEY = 'v_sheets_sync_config';
@@ -91,12 +93,17 @@ const DEFAULT_CONFIG: SheetConfig = {
     wallet_from: 'G',
     wallet_to: 'H'
   },
-  hasHeaders: true
+  hasHeaders: true,
+  transactionStartRow: 6,
+  autoSync: true
 };
 
 export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [config, setConfig] = useState<SheetConfig>(DEFAULT_CONFIG);
+  const [accessToken, setAccessToken] = useState<string>(() => localStorage.getItem('gs_access_token') || '');
+  const [isPulling, setIsPulling] = useState(false);
+  const [pullInfo, setPullInfo] = useState<string>('');
 
   // Load initial states
   useEffect(() => {
@@ -120,22 +127,171 @@ export default function App() {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
   };
 
-  const handleAddTransaction = (newTx: Omit<Transaction, 'id' | 'synced'>) => {
+  const getDeletedSignatures = (): string[] => {
+    try {
+      const raw = localStorage.getItem('v_deleted_tx_signatures');
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const addDeletedSignature = (t: Omit<Transaction, 'id' | 'synced'>) => {
+    try {
+      const sigs = getDeletedSignatures();
+      const sig = `${t.date}_${t.type}_${t.amount}_${t.currency || 'VND'}_${t.note.trim().toLowerCase()}`;
+      if (!sigs.includes(sig)) {
+        sigs.push(sig);
+        if (sigs.length > 1000) sigs.shift(); // Keep a safe historical depth
+        localStorage.setItem('v_deleted_tx_signatures', JSON.stringify(sigs));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleImportTransactions = (importedTxs: Transaction[]) => {
+    // Completely overwrite local transactions with imported ones from Google Sheets
+    const updated = importedTxs.map((imp) => ({
+      ...imp,
+      id: imp.id || `sheet-tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      synced: true
+    }));
+
+    // Sort newest first
+    updated.sort((a, b) => b.date.localeCompare(a.date));
+
+    setTransactions(updated);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
+    return updated.length;
+  };
+
+  // Auto Pull from Google Sheets when connected and autoSync is enabled
+  useEffect(() => {
+    if (!accessToken || !config.autoSync || !config.spreadsheetId) return;
+
+    const pullFromSheets = async () => {
+      setIsPulling(true);
+      setPullInfo('Đang tự động kiểm tra dữ liệu mới từ Google Sheets...');
+      try {
+        const fetched = await fetchTransactionsFromSheet(accessToken, config);
+        const count = handleImportTransactions(fetched);
+        setPullInfo(`Đồng bộ thành công: Sổ chi tiêu đã được cập nhật chính xác với ${count} giao dịch từ Google Sheets!`);
+      } catch (err: any) {
+        console.warn('Lỗi tự động tải dữ liệu từ Google Sheets:', err);
+        setPullInfo('Không thể tự động tải dữ liệu từ Google Sheets.');
+      } finally {
+        setIsPulling(false);
+        // Clear status alert after 5s
+        setTimeout(() => {
+          setPullInfo('');
+        }, 5000);
+      }
+    };
+
+    pullFromSheets();
+
+    // Check periodically for updates on Google Sheets every 60 seconds
+    const interval = setInterval(pullFromSheets, 60000);
+    return () => clearInterval(interval);
+  }, [accessToken, config.autoSync, config.spreadsheetId, config.sheetName]);
+
+  const handleAddTransaction = async (newTx: Omit<Transaction, 'id' | 'synced'>) => {
     const fresh: Transaction = {
       ...newTx,
       id: `tx-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       synced: false
     };
+    
+    // Save locally first
     const nextList = [fresh, ...transactions];
     saveTransactions(nextList);
+
+    // If autoSync is enabled and connected, append to Google Sheets immediately
+    if (config.autoSync && accessToken) {
+      try {
+        const res = await appendTransactionsToSheet(accessToken, config, [fresh]);
+        if (res.success) {
+          setTransactions((prev) => {
+            const updated = prev.map((t) => t.id === fresh.id ? { ...t, synced: true } : t);
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
+            return updated;
+          });
+          setPullInfo('Đã tự động đồng bộ giao dịch mới lên Google Sheets!');
+          setTimeout(() => setPullInfo(''), 3000);
+        }
+      } catch (err) {
+        console.error('Không thể tự động đồng bộ lên Google Sheets:', err);
+      }
+    }
   };
 
-  const handleDeleteTransaction = (id: string) => {
+  const handleTwoWaySync = async (localList: Transaction[] = transactions): Promise<Transaction[]> => {
+    if (!accessToken || !config.spreadsheetId) {
+      throw new Error('Vui lòng kết nối tài khoản Google trước.');
+    }
+
+    // Overwrite sheet with the current robust local list directly!
+    // Since Google Sheets is the master directory, having the app direct write ensures perfect sync of deletions, edits, or ordering.
+    await overwriteSheetWithTransactions(accessToken, config, localList);
+
+    // Save and mark as synced locally
+    const syncedList = localList.map((t) => ({ ...t, synced: true }));
+    setTransactions(syncedList);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(syncedList));
+
+    return syncedList;
+  };
+
+  const handleDeleteTransaction = async (id: string) => {
     const confirmed = window.confirm('Bạn có chắc chắn muốn xóa vĩnh viễn giao dịch này khỏi sổ theo dõi không?');
     if (!confirmed) return;
 
+    const toDelete = transactions.find((t) => t.id === id);
+    if (toDelete) {
+      addDeletedSignature(toDelete);
+    }
+
     const nextList = transactions.filter((t) => t.id !== id);
     saveTransactions(nextList);
+
+    // Auto-sync deletion if enabled
+    if (config.autoSync && accessToken) {
+      try {
+        setPullInfo('Đang tự động xóa và đồng bộ hai chiều cùng Google Sheets...');
+        await handleTwoWaySync(nextList);
+        setPullInfo('Đã tự động đồng bộ thay đổi (xóa) trên Google Sheets!');
+        setTimeout(() => setPullInfo(''), 3000);
+      } catch (err: any) {
+        console.error('Auto sync deletion failed:', err);
+        setPullInfo(`Lỗi tự động xóa: ${err.message || ''}`);
+        setTimeout(() => setPullInfo(''), 4000);
+      }
+    }
+  };
+
+  const handleEditTransaction = async (updatedTx: Transaction) => {
+    const oldTx = transactions.find((t) => t.id === updatedTx.id);
+    if (oldTx) {
+      addDeletedSignature(oldTx);
+    }
+
+    const nextList = transactions.map((t) => t.id === updatedTx.id ? updatedTx : t);
+    saveTransactions(nextList);
+
+    // Auto-sync edit if enabled and connected
+    if (config.autoSync && accessToken) {
+      try {
+        setPullInfo('Đang đồng bộ giao dịch được chỉnh sửa và đồng bộ hai chiều...');
+        await handleTwoWaySync(nextList);
+        setPullInfo('Đã tự động cập nhật và đồng bộ chỉnh sửa thành công!');
+        setTimeout(() => setPullInfo(''), 3000);
+      } catch (err: any) {
+        console.error('Auto sync edit failed:', err);
+        setPullInfo(`Lỗi đồng bộ chỉnh sửa: ${err.message || ''}`);
+        setTimeout(() => setPullInfo(''), 4000);
+      }
+    }
   };
 
   const handleMarkTransactionsSynced = (ids: string[]) => {
@@ -207,17 +363,41 @@ export default function App() {
           </div>
         </header>
 
+        {/* Auto Sync Banner Indicator */}
+        {accessToken && config.autoSync && (
+          <div className="bg-emerald-50 text-emerald-800 text-[11px] px-4 py-2.5 rounded-xl border border-emerald-100 flex items-center justify-between gap-2 shadow-2xs animate-fade-in font-medium">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span>
+                {pullInfo || 'Đồng bộ tự động hai chiều : Đang hoạt động thông suốt (Kiểm tra cập nhật mỗi phút)'}
+              </span>
+            </div>
+            {isPulling && (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600 flex-shrink-0" />
+            )}
+          </div>
+        )}
+
         {/* Bento Grid Application Body Dashboard */}
         <main className="grid grid-cols-1 lg:grid-cols-12 gap-6" id="dashboard-hub">
 
           {/* LEFT PANEL: Log entry form (span-4) */}
           <div className="lg:col-span-4 space-y-6">
             <TransactionForm onAddTransaction={handleAddTransaction} />
+            <SavingsManager />
             <SheetsSync
               config={config}
               onChangeConfig={handleChangeConfig}
+              transactions={transactions}
               unsyncedTransactions={unsyncedTransactions}
               onMarkTransactionsSynced={handleMarkTransactionsSynced}
+              accessToken={accessToken}
+              setAccessToken={setAccessToken}
+              onImportTransactions={handleImportTransactions}
+              onTwoWaySync={handleTwoWaySync}
             />
           </div>
 
@@ -227,6 +407,7 @@ export default function App() {
             <TransactionsList
               transactions={transactions}
               onDeleteTransaction={handleDeleteTransaction}
+              onEditTransaction={handleEditTransaction}
             />
           </div>
 
