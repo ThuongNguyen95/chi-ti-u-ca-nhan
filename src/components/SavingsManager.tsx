@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Calendar, PiggyBank, Plus, Bell, Trash2, CheckCircle, AlertTriangle, Sparkles, TrendingUp } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { Transaction } from '../types';
 
 export interface SavingsAccount {
   id: string;
@@ -16,16 +17,22 @@ export interface SavingsAccount {
   maturityDate: string; // Date of expiration
   interestRate?: number; // Yearly interest e.g., 5.5%
   isWithdrawn: boolean;
+  originalTx?: Transaction;
 }
 
 interface SavingsManagerProps {
-  onSavingsChange?: (savings: SavingsAccount[]) => void;
+  transactions: Transaction[];
+  onAddTransaction: (transaction: Omit<Transaction, 'id' | 'synced'>) => void;
+  onDeleteTransaction: (id: string) => void;
+  onEditTransaction: (transaction: Transaction) => void;
 }
 
-const LOCAL_STORAGE_SAVINGS_KEY = 'v_savings_accounts_term';
-
-export default function SavingsManager({ onSavingsChange }: SavingsManagerProps) {
-  const [savingsList, setSavingsList] = useState<SavingsAccount[]>([]);
+export default function SavingsManager({
+  transactions,
+  onAddTransaction,
+  onDeleteTransaction,
+  onEditTransaction
+}: SavingsManagerProps) {
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [startDate, setStartDate] = useState(() => new Date().toISOString().split('T')[0]);
@@ -35,48 +42,44 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
   const [showAddForm, setShowAddForm] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Load savings
-  useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_SAVINGS_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setSavingsList(parsed);
-      if (onSavingsChange) onSavingsChange(parsed);
-    } else {
-      // Default sample savings account
-      const samples: SavingsAccount[] = [
-        {
-          id: 'save-sample-1',
-          name: 'Sổ tiết kiệm Vietcombank 6 Tháng',
-          amount: 50000000,
-          currency: 'VND',
-          startDate: '2026-01-07',
-          maturityDate: '2026-07-07',
-          interestRate: 4.8,
-          isWithdrawn: false,
-        },
-        {
-          id: 'save-sample-2',
-          name: 'Mua xe mới năm sau',
-          amount: 15000000,
-          currency: 'VND',
-          startDate: '2025-06-01',
-          maturityDate: '2026-06-01',
-          interestRate: 5.2,
-          isWithdrawn: false,
-        }
-      ];
-      setSavingsList(samples);
-      localStorage.setItem(LOCAL_STORAGE_SAVINGS_KEY, JSON.stringify(samples));
-      if (onSavingsChange) onSavingsChange(samples);
-    }
-  }, []);
+  // Derive savings list from the master transactions synced with Google Sheet columns I & J
+  const savingsList: SavingsAccount[] = transactions
+    .filter((t) => (t.wallet === 'Tiết kiệm 🐷' || t.category === 'Tiết kiệm 🐷' || t.startDate || t.endDate))
+    .map((t) => {
+      // Parse optional interest rate from note e.g., "(Lãi suất 4.8%/năm)"
+      let parsedInterest: number | undefined = undefined;
+      const interestMatch = t.note.match(/Lãi suất ([\d.]+)%/i);
+      if (interestMatch) {
+         parsedInterest = parseFloat(interestMatch[1]);
+      }
 
-  const saveList = (updated: SavingsAccount[]) => {
-    setSavingsList(updated);
-    localStorage.setItem(LOCAL_STORAGE_SAVINGS_KEY, JSON.stringify(updated));
-    if (onSavingsChange) onSavingsChange(updated);
-  };
+      // Cleanup name for displaying
+      let displayName = t.note;
+      const splitIdx = displayName.indexOf(' (Lài suất');
+      if (splitIdx !== -1) {
+        displayName = displayName.substring(0, splitIdx);
+      }
+      const splitIdx2 = displayName.indexOf(' (Lỗi suất');
+      if (splitIdx2 !== -1) {
+        displayName = displayName.substring(0, splitIdx2);
+      }
+      const splitIdx3 = displayName.indexOf(' (Lãi suất');
+      if (splitIdx3 !== -1) {
+        displayName = displayName.substring(0, splitIdx3);
+      }
+
+      return {
+        id: t.id,
+        name: displayName || t.category || 'Khoản tiết kiệm',
+        amount: t.amount,
+        currency: (t.currency || 'VND') as 'VND' | 'INR',
+        startDate: t.startDate || t.date,
+        maturityDate: t.endDate || t.date,
+        interestRate: parsedInterest,
+        isWithdrawn: t.type === 'income', // Expense (Chi) is active deposit, Income (Thu) means withdrawn/matured
+        originalTx: t
+      };
+    });
 
   const handleAddAccount = (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,19 +106,20 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
       return;
     }
 
-    const newAcc: SavingsAccount = {
-      id: `save-${Date.now()}`,
-      name: name.trim(),
+    const rateVal = interestRate ? parseFloat(interestRate) : undefined;
+    const interestStr = rateVal ? ` (Lãi suất ${rateVal}%/năm)` : '';
+
+    onAddTransaction({
+      date: startDate,
+      type: 'expense', // Deposit is Chi (expense) to move money from main account into savings
       amount: parsedAmt,
       currency,
+      category: 'Tiết kiệm 🐷',
+      wallet: 'Tiết kiệm 🐷',
+      note: `${name.trim()}${interestStr}`,
       startDate,
-      maturityDate,
-      interestRate: interestRate ? parseFloat(interestRate) : undefined,
-      isWithdrawn: false,
-    };
-
-    const nextList = [newAcc, ...savingsList];
-    saveList(nextList);
+      endDate: maturityDate,
+    });
 
     // Reset Form
     setName('');
@@ -127,19 +131,28 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
   };
 
   const handleWithdraw = (id: string) => {
-    const confirmed = window.confirm('Quý khách xác nhận đã rút/tất toán số tiền tiết kiệm này về tài khoản chính? Trạng thái sẽ được đổi thành Đã Tất Toán.');
+    const target = savingsList.find((s) => s.id === id);
+    if (!target || !target.originalTx) return;
+
+    const confirmed = window.confirm('Quý khách xác nhận đã rút/tất toán số tiền tiết kiệm này về tài khoản chính? Trạng thái sẽ được đổi thành Đã Tất Toán (Thu nhập).');
     if (!confirmed) return;
 
-    const nextList = savingsList.map((s) => s.id === id ? { ...s, isWithdrawn: true } : s);
-    saveList(nextList);
+    // Direct edit transaction to change its type to 'income'
+    onEditTransaction({
+      ...target.originalTx,
+      type: 'income',
+      synced: false
+    });
   };
 
   const handleDelete = (id: string) => {
-    const confirmed = window.confirm('Có chắc chắn muốn xóa vĩnh viễn sổ tiết kiệm này khỏi ứng dụng?');
+    const target = savingsList.find((s) => s.id === id);
+    if (!target) return;
+
+    const confirmed = window.confirm('Có chắc chắn muốn xóa vĩnh viễn sổ tiết kiệm này?');
     if (!confirmed) return;
 
-    const nextList = savingsList.filter((s) => s.id !== id);
-    saveList(nextList);
+    onDeleteTransaction(id);
   };
 
   // Check expired active accounts
@@ -209,7 +222,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
                 <ul className="list-disc list-inside mt-1 space-y-1">
                   {expiredActiveAccounts.map((acc) => (
                     <li key={acc.id}>
-                      <span className="font-bold text-gray-900">{acc.name}</span>: <span className="font-mono text-red-700">{formatCurrency(acc.amount, acc.currency)}</span> (Ngày hết hạn: {acc.maturityDate})
+                      <span className="font-bold text-gray-900">{acc.name}</span>: <span className="font-mono text-red-700">{formatCurrency(acc.amount, acc.currency)}</span> (Ngày đáo hạn: {acc.maturityDate})
                     </li>
                   ))}
                 </ul>
@@ -232,7 +245,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
             <div className="flex justify-between items-center pb-1 border-b border-gray-200">
               <span className="font-bold text-gray-800 flex items-center gap-1">
                 <Sparkles className="w-3.5 h-3.5 text-yellow-500 animate-pulse" />
-                Mở sổ tiết kiệm kỳ hạn mới
+                Mở sổ tiết kiệm kỳ hạn mới (Ghi vào Google Sheets)
               </span>
               <div className="flex gap-1.5">
                 <button
@@ -290,7 +303,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Ngày gửi</label>
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Ngày bắt đầu gửi</label>
                   <input
                     type="date"
                     value={startDate}
@@ -299,7 +312,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Ngày đáo hạn / Hết hạn</label>
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">Ngày đáo hạn / Kết thúc</label>
                   <input
                     type="date"
                     value={maturityDate}
@@ -321,7 +334,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
               type="submit"
               className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-all cursor-pointer"
             >
-              Tạo Sổ Tiết Kiệm
+              Tạo Sổ Tiết Kiệm & Đồng Bộ
             </button>
           </motion.form>
         )}
@@ -330,13 +343,18 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
       {/* Savings checklist */}
       <div className="space-y-2.5">
         {savingsList.length === 0 ? (
-          <p className="text-xs text-gray-400 text-center py-6">Chưa có sổ tiết kiệm có thời hạn nào.</p>
+          <div className="text-center py-6 border border-dashed border-gray-200 rounded-xl">
+            <p className="text-xs text-gray-500 font-medium">Chưa phát hiện tài khoản tiết kiệm nào.</p>
+            <p className="text-[10px] text-gray-400 mt-1 max-w-[280px] mx-auto leading-relaxed">
+              Dữ liệu được đồng bộ trực tiếp từ các dòng có Ngày bắt đầu & Ngày kết thúc trên Google Sheet của bạn.
+            </p>
+          </div>
         ) : (
           savingsList.map((acc) => {
             const daysLeft = getDaysRemaining(acc.maturityDate);
             const isExpired = daysLeft <= 0 && !acc.isWithdrawn;
             const statusClass = acc.isWithdrawn
-              ? 'bg-gray-100 text-gray-400 line-through'
+              ? 'bg-gray-100 text-gray-400 line-through border-gray-200'
               : isExpired
               ? 'bg-red-50 border-red-200'
               : 'bg-emerald-50/10 border-gray-100';
@@ -356,18 +374,18 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
                       </span>
                     ) : isExpired ? (
                       <span className="text-[9px] font-bold uppercase bg-red-600 text-white px-2 py-0.5 rounded animate-pulse">
-                        Sổ đã Hết hạn
+                        Đến hạn rút
                       </span>
                     ) : (
                       <span className="text-[9px] font-bold uppercase bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
-                        Đang tích lũy
+                        Đang hoạt động
                       </span>
                     )}
 
-                    {acc.interestRate && (
+                    {acc.interestRate !== undefined && (
                       <span className="text-[9px] font-bold bg-amber-50 text-amber-800 px-1.8 py-0.5 rounded border border-amber-200 flex items-center gap-1">
                         <TrendingUp className="w-2.5 h-2.5 text-amber-500" />
-                        Lãi suất {acc.interestRate}%/năm
+                        Lãi {acc.interestRate}%/năm
                       </span>
                     )}
                   </div>
@@ -378,7 +396,7 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
                       Kỳ hạn: {acc.startDate} → <span className="font-bold text-gray-700">{acc.maturityDate}</span>
                     </span>
                     {!acc.isWithdrawn && (
-                      <span className={`font-semibold ${isExpired ? 'text-red-600 underline' : 'text-gray-600'}`}>
+                      <span className={`font-semibold ${isExpired ? 'text-red-600 underline' : 'text-gray-650'}`}>
                         {isExpired ? 'Đã quá hạn đáo hạn!' : `Còn lại: ${daysLeft} ngày`}
                       </span>
                     )}
@@ -389,12 +407,12 @@ export default function SavingsManager({ onSavingsChange }: SavingsManagerProps)
                 <div className="flex items-center justify-between md:justify-end gap-3.5 pt-2 md:pt-0 border-t md:border-none border-gray-100">
                   <div className="text-left md:text-right">
                     <span className="text-[10px] text-gray-400 font-bold block uppercase tracking-wider">Tiền gửi</span>
-                    <span className="font-mono font-bold text-gray-900 text-md">
+                    <span className="font-mono font-bold text-gray-900 text-sm">
                       {formatCurrency(acc.amount, acc.currency)}
                     </span>
                   </div>
 
-                  <div className="flex gap-1">
+                  <div className="flex gap-1 justify-end">
                     {!acc.isWithdrawn && (
                       <button
                         onClick={() => handleWithdraw(acc.id)}

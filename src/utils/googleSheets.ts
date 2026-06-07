@@ -93,7 +93,9 @@ export async function appendTransactionsToSheet(
       colIndex(mappings.currency),
       colIndex(mappings.category),
       colIndex(mappings.wallet_from),
-      colIndex(mappings.wallet_to)
+      colIndex(mappings.wallet_to),
+      mappings.startDate ? colIndex(mappings.startDate) : -1,
+      mappings.endDate ? colIndex(mappings.endDate) : -1
     );
 
     for (let i = 0; i <= maxIndex; i++) {
@@ -132,8 +134,42 @@ export async function appendTransactionsToSheet(
       rowData[colIndex(mappings.wallet_to)] = t.wallet;
     }
 
+    if (mappings.startDate) {
+      rowData[colIndex(mappings.startDate)] = t.startDate || '';
+    }
+    if (mappings.endDate) {
+      rowData[colIndex(mappings.endDate)] = t.endDate || '';
+    }
+
     return rowData;
   });
+
+  const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+  if (syncMethod === 'appsscript') {
+    const scriptUrl = localStorage.getItem('gs_appsscript_url') || '';
+    const scriptKey = localStorage.getItem('gs_appsscript_key') || '';
+    if (!scriptUrl) throw new Error('Chưa cấu hình URL Google Apps Script.');
+
+    const response = await fetch(scriptUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'append',
+        key: scriptKey,
+        data: rows,
+      }),
+    });
+
+    if (!response.ok) throw new Error('Không thể đồng bộ bổ sung qua Google Apps Script Web App.');
+    const resData = await response.json();
+    if (!resData.success) throw new Error(resData.error || 'Lỗi bổ sung dữ liệu tại Apps Script.');
+    return {
+      success: true,
+      appendedCount: transactions.length,
+    };
+  }
 
   const range = `${config.sheetName}!A:Z`;
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`;
@@ -280,34 +316,9 @@ export function parseAmountString(str: string, currency: 'VND' | 'INR' = 'VND'):
 }
 
 /**
- * Fetches all transactions from Google Sheets and parses them back to Transaction objects
+ * Parses raw grid rows from Google Sheets into robust Application Transaction objects
  */
-export async function fetchTransactionsFromSheet(
-  accessToken: string,
-  config: SheetConfig
-): Promise<Transaction[]> {
-  const range = `${config.sheetName}!A1:Z2000`;
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}/values/${encodeURIComponent(range)}`;
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  if (!response.ok) {
-    let detail = '';
-    try {
-      const errData = await response.json();
-      detail = errData.error?.message || response.statusText;
-    } catch (e) {
-      detail = response.statusText;
-    }
-    throw new Error(`Không thể tải dữ liệu tự động từ Sheets (Chi tiết: ${detail})`);
-  }
-
-  const data = await response.json();
-  const rows = data.values || [];
+export function parseRowsToTransactions(rows: any[][], config: SheetConfig): Transaction[] {
   if (rows.length === 0) return [];
 
   const mappings = config.columnMapping;
@@ -324,6 +335,8 @@ export async function fetchTransactionsFromSheet(
   const idxCategory = colIndex(mappings.category);
   const idxWalletFrom = colIndex(mappings.wallet_from);
   const idxWalletTo = colIndex(mappings.wallet_to);
+  const idxStartDate = mappings.startDate ? colIndex(mappings.startDate) : -1;
+  const idxEndDate = mappings.endDate ? colIndex(mappings.endDate) : -1;
 
   // Flexible Offset Start Row: if hasHeaders is true, we fallback to 6 (for our beautiful template with headers on row 5, trans start on row 6).
   // Otherwise, fallback to 2 or 1.
@@ -343,6 +356,8 @@ export async function fetchTransactionsFromSheet(
     const rawCategory = row[idxCategory] !== undefined ? String(row[idxCategory]) : '';
     const rawWalletFrom = row[idxWalletFrom] !== undefined ? String(row[idxWalletFrom]) : '';
     const rawWalletTo = row[idxWalletTo] !== undefined ? String(row[idxWalletTo]) : '';
+    const rawStartDate = idxStartDate !== -1 && row[idxStartDate] !== undefined ? String(row[idxStartDate]) : '';
+    const rawEndDate = idxEndDate !== -1 && row[idxEndDate] !== undefined ? String(row[idxEndDate]) : '';
 
     // Skip if crucial fields are empty
     if (!rawDate && !rawAmount) continue;
@@ -387,10 +402,61 @@ export async function fetchTransactionsFromSheet(
       wallet,
       synced: true, // Mark as synced as it came from the spreadsheet
       rawDateTime: rawDate.trim(), // Cache original spreadsheet formatted date-time string
+      startDate: rawStartDate.trim() || undefined,
+      endDate: rawEndDate.trim() || undefined,
     });
   }
 
   return transactions;
+}
+
+/**
+ * Fetches all transactions from Google Sheets and parses them back to Transaction objects
+ */
+export async function fetchTransactionsFromSheet(
+  accessToken: string,
+  config: SheetConfig
+): Promise<Transaction[]> {
+  const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+  if (syncMethod === 'appsscript') {
+    const scriptUrl = localStorage.getItem('gs_appsscript_url') || '';
+    const scriptKey = localStorage.getItem('gs_appsscript_key') || '';
+    if (!scriptUrl) throw new Error('Chưa cấu hình URL Google Apps Script.');
+
+    const url = `${scriptUrl}?action=fetch&key=${encodeURIComponent(scriptKey)}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Không thể đồng bộ qua Google Apps Script Web App.');
+    
+    const resData = await response.json();
+    if (!resData.success) throw new Error(resData.error || 'Lỗi lấy dữ liệu tại Apps Script.');
+
+    const rows = resData.values || [];
+    return parseRowsToTransactions(rows, config);
+  }
+
+  const range = `${config.sheetName}!A1:Z2000`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}/values/${encodeURIComponent(range)}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errData = await response.json();
+      detail = errData.error?.message || response.statusText;
+    } catch (e) {
+      detail = response.statusText;
+    }
+    throw new Error(`Không thể tải dữ liệu tự động từ Sheets (Chi tiết: ${detail})`);
+  }
+
+  const data = await response.json();
+  const rows = data.values || [];
+  return parseRowsToTransactions(rows, config);
 }
 
 /**
@@ -402,6 +468,32 @@ export async function overwriteSheetWithTransactions(
   config: SheetConfig,
   transactions: Transaction[]
 ): Promise<{ success: boolean }> {
+  const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+  if (syncMethod === 'appsscript') {
+    const scriptUrl = localStorage.getItem('gs_appsscript_url') || '';
+    const scriptKey = localStorage.getItem('gs_appsscript_key') || '';
+    if (!scriptUrl) throw new Error('Chưa cấu hình URL Google Apps Script.');
+
+    const rows = mapTransactionsToRows(transactions, config);
+
+    const response = await fetch(scriptUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'push',
+        key: scriptKey,
+        data: rows,
+      }),
+    });
+
+    if (!response.ok) throw new Error('Không thể đồng bộ lưu đè qua Google Apps Script Web App.');
+    const resData = await response.json();
+    if (!resData.success) throw new Error(resData.error || 'Lỗi lưu dữ liệu tại Apps Script.');
+    return { success: true };
+  }
+
   // Calculate mapped columns boundaries to avoid wiping out other formatting/columns on Google Sheet
   const mappings = config.columnMapping;
   const cols = [
@@ -412,8 +504,10 @@ export async function overwriteSheetWithTransactions(
     mappings.currency,
     mappings.category,
     mappings.wallet_from,
-    mappings.wallet_to
-  ].map((c) => c.trim().toUpperCase()).filter(Boolean);
+    mappings.wallet_to,
+    mappings.startDate,
+    mappings.endDate
+  ].map((c) => c ? c.trim().toUpperCase() : '').filter(Boolean);
 
   const minColumn = cols.reduce((min, curr) => (curr < min ? curr : min), 'Z');
   const maxColumn = cols.reduce((max, curr) => (curr > max ? curr : max), 'A');
@@ -444,11 +538,58 @@ export async function overwriteSheetWithTransactions(
     return { success: true };
   }
 
-  // 2. Map current transactions to row entries relative to minColumn and maxColumn bounds
+  const rows = mapTransactionsToRows(transactions, config);
+
+  // 3. Write rows back to Google Sheets starting from the design range matching minColumn
+  const writeRange = `${config.sheetName}!${minColumn}${writeStartRow}`;
+  const writeUrl = `https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}/values/${encodeURIComponent(writeRange)}?valueInputOption=USER_ENTERED`;
+
+  const writeResponse = await fetch(writeUrl, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      values: rows,
+    }),
+  });
+
+  if (!writeResponse.ok) {
+    const errData = await writeResponse.json().catch(() => ({}));
+    throw new Error(errData.error?.message || 'Không thể cập nhật danh sách giao dịch lên Google Sheets.');
+  }
+
+  return { success: true };
+}
+
+/**
+ * Maps application Transaction list into physical table rows aligned with Google Sheet column mappings
+ */
+export function mapTransactionsToRows(transactions: Transaction[], config: SheetConfig): any[][] {
+  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  const mappings = config.columnMapping;
+
   const colIndex = (col: string): number => {
     const char = col.trim().toUpperCase().charCodeAt(0);
-    return char - 65; // 'A' -> 0, etc.
+    return char - 65;
   };
+
+  const cols = [
+    mappings.date,
+    mappings.note,
+    mappings.type,
+    mappings.amount,
+    mappings.currency,
+    mappings.category,
+    mappings.wallet_from,
+    mappings.wallet_to,
+    mappings.startDate,
+    mappings.endDate
+  ].map((c) => c ? c.trim().toUpperCase() : '').filter(Boolean);
+
+  const minColumn = cols.reduce((min, curr) => (curr < min ? curr : min), 'Z');
+  const maxColumn = cols.reduce((max, curr) => (curr > max ? curr : max), 'A');
 
   const minIndex = colIndex(minColumn);
   const maxIndex = colIndex(maxColumn);
@@ -456,17 +597,13 @@ export async function overwriteSheetWithTransactions(
     return colIndex(col) - minIndex;
   };
 
-  // Overwrite works best when we put oldest-first on Google Sheet, matching standard order.
-  // The app's state holds newest first, so we reverse it to map back to sheet properly.
-  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-  const rows = sorted.map((t) => {
+  return sorted.map((t) => {
     const rowData: any[] = [];
     const size = maxIndex - minIndex + 1;
     for (let i = 0; i < size; i++) {
       rowData.push('');
     }
 
-    // Preserve formatting and date precision
     let dateToWrite = t.rawDateTime;
     if (!dateToWrite) {
       const parts = t.date.split('-');
@@ -496,28 +633,13 @@ export async function overwriteSheetWithTransactions(
       rowData[getCellIndex(mappings.wallet_to)] = t.wallet;
     }
 
+    if (mappings.startDate) {
+      rowData[getCellIndex(mappings.startDate)] = t.startDate || '';
+    }
+    if (mappings.endDate) {
+      rowData[getCellIndex(mappings.endDate)] = t.endDate || '';
+    }
+
     return rowData;
   });
-
-  // 3. Write rows back to Google Sheets starting from the design range matching minColumn
-  const writeRange = `${config.sheetName}!${minColumn}${writeStartRow}`;
-  const writeUrl = `https://sheets.googleapis.com/v4/spreadsheets/${config.spreadsheetId}/values/${encodeURIComponent(writeRange)}?valueInputOption=USER_ENTERED`;
-
-  const writeResponse = await fetch(writeUrl, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      values: rows,
-    }),
-  });
-
-  if (!writeResponse.ok) {
-    const errData = await writeResponse.json().catch(() => ({}));
-    throw new Error(errData.error?.message || 'Không thể cập nhật danh sách giao dịch lên Google Sheets.');
-  }
-
-  return { success: true };
 }

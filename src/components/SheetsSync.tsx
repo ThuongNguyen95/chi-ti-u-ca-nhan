@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { SheetConfig, Transaction } from '../types';
 import { fetchUserProfile, appendTransactionsToSheet, getSheetMetaData, fetchTransactionsFromSheet, UserProfile, overwriteSheetWithTransactions } from '../utils/googleSheets';
-import { Cloud, Lock, ShieldCheck, Check, LogOut, Settings2, HelpCircle, ToggleLeft, Copy, Sliders, RefreshCw } from 'lucide-react';
+import { Cloud, Lock, ShieldCheck, Check, LogOut, Settings2, HelpCircle, ToggleLeft, Copy, Sliders, RefreshCw, Key, User, BookOpen } from 'lucide-react';
 
 interface SheetsSyncProps {
   config: SheetConfig;
@@ -38,13 +38,23 @@ export default function SheetsSync({
   const [manualToken, setManualToken] = useState('');
   const [currentOrigin, setCurrentOrigin] = useState('');
 
+  // App Script persistent login States
+  const [syncMethod, setSyncMethod] = useState<'oauth' | 'appsscript'>(() => {
+    return (localStorage.getItem('gs_sync_method') as 'oauth' | 'appsscript') || 'oauth';
+  });
+  const [scriptUrl, setScriptUrl] = useState(() => localStorage.getItem('gs_appsscript_url') || '');
+  const [scriptKey, setScriptKey] = useState(() => localStorage.getItem('gs_appsscript_key') || '');
+  const [isAppsScriptLoggedIn, setIsAppsScriptLoggedIn] = useState(() => {
+    return !!localStorage.getItem('gs_appsscript_url') && !!localStorage.getItem('gs_appsscript_key');
+  });
+
   useEffect(() => {
     setCurrentOrigin(window.location.origin);
   }, []);
 
   // Try to load user profile if token already exists on load
   useEffect(() => {
-    if (accessToken) {
+    if (accessToken && syncMethod === 'oauth') {
       setIsLoading(true);
       fetchUserProfile(accessToken)
         .then((profile) => {
@@ -69,22 +79,22 @@ export default function SheetsSync({
         })
         .finally(() => setIsLoading(false));
     }
-  }, [accessToken]);
+  }, [accessToken, syncMethod]);
 
   // Handle Client-side popup redirection messaging
   useEffect(() => {
     const handleGoogleCallback = (event: MessageEvent) => {
-      // Validate incoming origin same as applet origin
       if (!event.origin.includes('.run.app') && !event.origin.includes('localhost') && event.origin !== window.location.origin) {
         return;
       }
 
       if (event.data?.type === 'OAUTH_TOKEN' && event.data?.hash) {
-        // Parse oauth params from hash
         const params = new URLSearchParams(event.data.hash.substring(1));
         const token = params.get('access_token');
         if (token) {
           setAccessToken(token);
+          setSyncMethod('oauth');
+          localStorage.setItem('gs_sync_method', 'oauth');
           setSyncMessage({ type: 'success', text: 'Đăng nhập Google thành công!' });
         } else {
           setSyncMessage({ type: 'err', text: 'Không tìm thấy Access Token trong phản hồi từ Google.' });
@@ -94,20 +104,23 @@ export default function SheetsSync({
 
     window.addEventListener('message', handleGoogleCallback);
     return () => window.removeEventListener('message', handleGoogleCallback);
-  }, []);
-
-  // Note: OAuth callback is processed securely by the dedicated static callback page (/public/oauth_callback.html).
-  // This prevents the full React application from loading inside the popup, resolving issues
-  // related to Vite development scripts or environment-specific window.fetch getter/setter restrictions.
+  }, [setAccessToken]);
 
   const handleLogout = () => {
     setAccessToken('');
     setUserProfile(null);
     localStorage.removeItem('gs_access_token');
+    
+    // Apps script reset
+    localStorage.removeItem('gs_appsscript_url');
+    localStorage.removeItem('gs_appsscript_key');
+    setIsAppsScriptLoggedIn(false);
+    setScriptUrl('');
+    setScriptKey('');
+
     setSyncMessage(null);
   };
 
-  // Standard Popup auth Trigger
   const handleGoogleAuthPopup = () => {
     setSyncMessage(null);
     if (!config.clientId) {
@@ -154,10 +167,50 @@ export default function SheetsSync({
     }
   };
 
+  const handleAppsScriptLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSyncMessage(null);
+
+    if (!scriptUrl.trim()) {
+      setSyncMessage({ type: 'err', text: 'Vui lòng nhập Đường dẫn Web App (Tài khoản).' });
+      return;
+    }
+
+    if (!scriptKey.trim()) {
+      setSyncMessage({ type: 'err', text: 'Vui lòng nhập Mật khẩu bảo mật.' });
+      return;
+    }
+
+    setIsLoading(true);
+    // Test fetch transactions
+    const testUrl = `${scriptUrl.trim()}?action=fetch&key=${encodeURIComponent(scriptKey.trim())}`;
+    
+    fetch(testUrl)
+      .then(res => {
+         if (!res.ok) throw new Error('Không thể kết nối đến Apps Script Web App.');
+         return res.json();
+      })
+      .then(data => {
+         if (data && data.success === false) {
+           throw new Error(data.error || 'Mật khẩu bảo mật không khớp.');
+         }
+         // Save credentials
+         localStorage.setItem('gs_sync_method', 'appsscript');
+         localStorage.setItem('gs_appsscript_url', scriptUrl.trim());
+         localStorage.setItem('gs_appsscript_key', scriptKey.trim());
+         setSyncMethod('appsscript');
+         setIsAppsScriptLoggedIn(true);
+         setSyncMessage({ type: 'success', text: 'Đăng nhập Mật Khẩu qua Google Apps Script thành công! Trình trạng hoạt động: Ổn định vĩnh viễn.' });
+      })
+      .catch((err) => {
+         console.error(err);
+         setSyncMessage({ type: 'err', text: `Đăng nhập thất bại: ${err.message || 'Kiểm tra lại đường dẫn/mật khẩu.'}` });
+      })
+      .finally(() => setIsLoading(false));
+  };
+
   const sanitizeAccessToken = (input: string): string => {
     let clean = input.trim();
-    
-    // Thử trích xuất nếu người dùng dán toàn bộ đoạn JSON từ OAuth Playground
     if (clean.startsWith('{')) {
       try {
         const parsed = JSON.parse(clean);
@@ -166,8 +219,6 @@ export default function SheetsSync({
         }
       } catch (e) {}
     }
-
-    // Nếu người dùng dán cả URL callback chứa tham số access_token
     if (clean.includes('access_token=')) {
       try {
         const match = clean.match(/access_token=([^&]+)/);
@@ -176,16 +227,12 @@ export default function SheetsSync({
         }
       } catch (e) {}
     }
-
-    // Loại bỏ dấu nháy kép hoặc đơn bọc ngoài nếu dán nhầm của JSON
     if ((clean.startsWith('"') && clean.endsWith('"')) || (clean.startsWith("'") && clean.endsWith("'"))) {
       clean = clean.substring(1, clean.length - 1).trim();
     }
-
     return clean;
   };
 
-  // Submit manual playground/developer token
   const handleManualTokenSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!manualToken.trim()) return;
@@ -199,6 +246,8 @@ export default function SheetsSync({
       const profile = await fetchUserProfile(token);
       setUserProfile(profile);
       setAccessToken(token);
+      setSyncMethod('oauth');
+      localStorage.setItem('gs_sync_method', 'oauth');
       localStorage.setItem('gs_access_token', token);
       setManualToken('');
       setSyncMessage({ type: 'success', text: 'Nhập Token thủ công thành công!' });
@@ -214,6 +263,8 @@ export default function SheetsSync({
           picture: '',
         });
         setAccessToken(token);
+        setSyncMethod('oauth');
+        localStorage.setItem('gs_sync_method', 'oauth');
         localStorage.setItem('gs_access_token', token);
         setManualToken('');
         setSyncMessage({
@@ -234,10 +285,10 @@ export default function SheetsSync({
     }
   };
 
-  // Triggers complete overwrite of sheet to align with app state (vital for updating or deleting records)
   const handleSyncToSheets = async () => {
-    if (!accessToken) {
-      setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản Google trước' });
+    const isScript = syncMethod === 'appsscript';
+    if (!accessToken && !isScript) {
+      setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản hoặc cấu hình Apps Script trước.' });
       return;
     }
 
@@ -245,10 +296,9 @@ export default function SheetsSync({
     setSyncMessage(null);
 
     try {
-      // First, fetch structure to confirm access
-      await getSheetMetaData(accessToken, config);
-
-      // Save transactions online by pulling and merging first, then overwriting for perfect sync of deletions/edits/additions
+      if (!isScript) {
+        await getSheetMetaData(accessToken, config);
+      }
       const syncedList = await onTwoWaySync();
       setSyncMessage({
         type: 'success',
@@ -258,17 +308,17 @@ export default function SheetsSync({
       console.error('Sync failed:', error);
       setSyncMessage({
         type: 'err',
-        text: error.message || 'Lỗi đồng bộ. Hãy kiểm tra cài đặt chia sẻ hoặc hết hạn Token.',
+        text: error.message || 'Lỗi đồng bộ. Hãy kiểm tra cài đặt chia sẻ hoặc mật khẩu bảo mật.',
       });
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Triggers Pull and Import from Sheets
   const handlePullFromSheets = async () => {
-    if (!accessToken) {
-      setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản Google trước' });
+    const isScript = syncMethod === 'appsscript';
+    if (!accessToken && !isScript) {
+      setSyncMessage({ type: 'err', text: 'Vui lòng kết nối tài khoản hoặc cấu hình Apps Script trước.' });
       return;
     }
 
@@ -280,13 +330,13 @@ export default function SheetsSync({
       const addedCount = onImportTransactions(fetched);
       setSyncMessage({
         type: 'success',
-        text: `Đã tải đồng bộ thành công ${addedCount} giao dịch từ Google Sheets về ứng dụng. Toàn bộ dữ liệu cục bộ đã được cập nhật chính xác tuyệt đối theo file file Google Sheets gốc của bạn!`,
+        text: `Đã tải đồng bộ thành công ${addedCount} giao dịch từ Google Sheets về ứng dụng. Toàn bộ dữ liệu cục bộ đã được cập nhật chính xác tuyệt đối theo file Google Sheets gốc của bạn!`,
       });
     } catch (error: any) {
       console.error('Pull failed:', error);
       setSyncMessage({
         type: 'err',
-        text: error.message || 'Lỗi tải dữ liệu. Hãy kiểm tra cài đặt chia sẻ hoặc hết hạn Token.',
+        text: error.message || 'Lỗi tải dữ liệu. Hãy kiểm tra cài đặt chia sẻ hoặc mật khẩu bảo mật.',
       });
     } finally {
       setIsLoading(false);
@@ -298,11 +348,88 @@ export default function SheetsSync({
     alert('Đã sao chép vào bộ nhớ tạm!');
   };
 
+  const appScriptSetupCode = `// Google Apps Script - Sổ chi tiêu Cá Nhân 🐷
+// Hướng dẫn: Mở Google Sheet > Tiện ích mở rộng > Apps Script > Dán đè mã bên dưới vào và chọn Triển khai dưới dạng Web App!
+var SECURITY_KEY = "Mật_Khẩu_Của_Bạn"; // Thay mật khẩu bảo mật của riêng bạn ở đây
+
+function doGet(e) {
+  return handleRequest(e);
+}
+
+function doPost(e) {
+  return handleRequest(e);
+}
+
+function handleRequest(e) {
+  var action = e.parameter.action;
+  var key = e.parameter.key;
+  
+  if (e.postData && e.postData.contents) {
+    try {
+      var body = JSON.parse(e.postData.contents);
+      if (body.key) key = body.key;
+      if (body.action) action = body.action;
+    } catch(err) {}
+  }
+  
+  if (key !== SECURITY_KEY) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Sai Mật khẩu bảo mật!" }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  
+  if (action === "fetch") {
+    var rows = sheet.getDataRange().getValues();
+    return ContentService.createTextOutput(JSON.stringify({ success: true, values: rows }))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+  
+  if (action === "push") {
+    try {
+      var body = JSON.parse(e.postData.contents);
+      var rowsToSave = body.data;
+      var startRow = 6;
+      if (sheet.getLastRow() >= startRow) {
+        sheet.getRange(startRow, 1, sheet.getLastRow() - startRow + 1, sheet.getLastColumn()).clearContent();
+      }
+      if (rowsToSave && rowsToSave.length > 0) {
+        sheet.getRange(startRow, 1, rowsToSave.length, rowsToSave[0].length).setValues(rowsToSave);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    } catch(err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.message }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "append") {
+    try {
+      var body = JSON.parse(e.postData.contents);
+      var rowsToAppend = body.data;
+      if (rowsToAppend && rowsToAppend.length > 0) {
+        sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    } catch(err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.message }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Hành động khách hàng không hợp lệ!" }))
+                       .setMimeType(ContentService.MimeType.JSON);
+}`;
+
+  const hasActiveSession = (syncMethod === 'oauth' && !!accessToken) || (syncMethod === 'appsscript' && isAppsScriptLoggedIn);
+
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-6 space-y-5" id="sheets-sync-container">
       <div className="flex items-center justify-between">
         <h3 className="font-sans font-semibold text-lg text-gray-900 tracking-tight flex items-center gap-2">
-          <Cloud className="w-5 h-5 text-emerald-600" />
+          <Cloud className="w-5 h-5 text-emerald-600 animate-pulse" />
           Đồng bộ Google Sheets
         </h3>
         <button
@@ -328,32 +455,143 @@ export default function SheetsSync({
         </div>
       )}
 
-      {/* Account Info and Action buttons */}
-      {!accessToken ? (
-        <div className="bg-gray-50/70 py-6 px-4 rounded-2xl border border-gray-100 text-center space-y-4">
-          <div className="p-3 bg-white w-12 h-12 rounded-full shadow-2xs mx-auto flex items-center justify-center border border-gray-1.00">
-            <Lock className="w-5 h-5 text-gray-400" />
-          </div>
-          <div>
-            <h4 className="text-sm font-semibold text-gray-800">Chưa kết nối tài khoản</h4>
-            <p className="text-xs text-gray-500 mt-1">
-              Đồng bộ bảng dữ liệu chi tiêu trực tiếp sang tệp tài liệu Google Sheet của bạn.
-            </p>
-          </div>
-
+      {/* METHOD CHOOSE TAB BAR IF NOT LOGGED IN */}
+      {!hasActiveSession && (
+        <div className="flex bg-gray-50/70 p-1 rounded-xl border border-gray-100 gap-1 text-xs">
           <button
-            onClick={handleGoogleAuthPopup}
-            disabled={isLoading}
-            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+            onClick={() => {
+               setSyncMethod('appsscript');
+               localStorage.setItem('gs_sync_method', 'appsscript');
+               setSyncMessage(null);
+            }}
+            className={`flex-1 py-2 font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${syncMethod === 'appsscript' ? 'bg-white text-gray-900 shadow-xs border border-gray-100' : 'text-gray-500 hover:text-gray-800'}`}
           >
-            {isLoading ? 'Đang kết nối...' : 'Kết nối Google Sheets 🚀'}
+            <Key className="w-3.5 h-3.5 text-amber-550" />
+            Tài Khoản & Mật Khẩu
+          </button>
+          <button
+            onClick={() => {
+               setSyncMethod('oauth');
+               localStorage.setItem('gs_sync_method', 'oauth');
+               setSyncMessage(null);
+            }}
+            className={`flex-1 py-2 font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${syncMethod === 'oauth' ? 'bg-white text-gray-900 shadow-xs border border-gray-100' : 'text-gray-500 hover:text-gray-800'}`}
+          >
+            <User className="w-3.5 h-3.5 text-blue-550" />
+            Google Account (OAuth)
           </button>
         </div>
+      )}
+
+      {/* RENDER ACTIVE LOGIN METHOD PORTALS */}
+      {!hasActiveSession ? (
+        syncMethod === 'appsscript' ? (
+          /* APPS SCRIPT WEB APP PASSWORD FLOW FORM */
+          <form onSubmit={handleAppsScriptLogin} className="bg-gray-50/70 p-4 rounded-xl border border-gray-100 space-y-4">
+            <div className="text-center pb-2 border-b border-gray-150">
+              <h4 className="text-xs font-bold text-gray-700 uppercase flex items-center justify-center gap-1.5">
+                <Key className="w-4 h-4 text-emerald-600 animate-pulse" />
+                Đăng nhập ổn định tuyệt đối (Dành cho Android APK / Điện thoại)
+              </h4>
+              <p className="text-[10px] text-gray-450 mt-1 max-w-[270px] mx-auto leading-relaxed font-semibold">
+                Sử dụng kết nối Google Apps Script để tránh hết hạn Token (không bao giờ bị đăng xuất). Hoàn hảo cho thiết bị Android, iOS, hoặc Web.
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">
+                  Đường dẫn Web App (Tài khoản)
+                </label>
+                <input
+                  type="url"
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  required
+                  value={scriptUrl}
+                  onChange={(e) => setScriptUrl(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-gray-200 rounded-lg placeholder-gray-300 font-mono focus:outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1">
+                  Mật khẩu bảo mật
+                </label>
+                <input
+                  type="password"
+                  placeholder="Nhập SECURITY_KEY bạn cấu hình"
+                  required
+                  value={scriptKey}
+                  onChange={(e) => setScriptKey(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-gray-200 rounded-lg placeholder-gray-300 focus:outline-hidden"
+                />
+              </div>
+            </div>
+
+            <button
+               type="submit"
+               disabled={isLoading}
+               className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+               {isLoading ? 'Đang kiểm tra kết nối...' : 'Đăng nhập & Duy trì kết nối vĩnh viễn 🔑'}
+            </button>
+
+            {/* Help install collapsible code */}
+            <div className="bg-amber-50/50 p-3 rounded-lg border border-amber-100 text-[10px] text-amber-900 space-y-1.5 leading-relaxed font-semibold">
+               <span className="font-bold flex items-center gap-1.5">
+                 <BookOpen className="w-3.5 h-3.5 text-amber-600" />
+                 Cách cài đặt mã Apps Script trên Google Sheet:
+               </span>
+               <ol className="list-decimal list-inside space-y-1">
+                 <li>Mở file Google Sheet của bạn trên máy tính</li>
+                 <li>Chọn menu <b>Tiện ích mở rộng (Extensions)</b> &gt; <b>Apps Script</b></li>
+                 <li>Dán đè tất cả mã script hỗ trợ và đổi mật khẩu bất kỳ</li>
+                 <li>Nhấn <b>Triển khai (Deploy)</b> &gt; <b>Tạo phiên bản triển khai mới</b></li>
+                 <li>Chọn loại: <b>Ứng dụng Web (Web App)</b>, phân quyền: <b>Bất kỳ ai (Anyone)</b> rồi nhấn Triển khai.</li>
+                 <li>Copy link Web App sinh ra dán vào ô "Web App" bên trên và đăng nhập!</li>
+               </ol>
+               <button
+                 type="button"
+                 onClick={() => copyToClipboard(appScriptSetupCode)}
+                 className="mt-1 w-full py-1.5 bg-white text-[10px] font-bold text-emerald-700 hover:text-white border border-emerald-200 hover:bg-emerald-600 rounded-md transition-all flex items-center justify-center gap-1.5"
+               >
+                 <Copy className="w-3.5 h-3.5" />
+                 Copy Đoạn Mã Apps Script Mẫu
+               </button>
+            </div>
+          </form>
+        ) : (
+          /* STANDARD OAUTH LOG IN BANNER */
+          <div className="bg-gray-50/70 py-6 px-4 rounded-2xl border border-gray-100 text-center space-y-4 animate-fadeIn">
+            <div className="p-3 bg-white w-12 h-12 rounded-full shadow-2xs mx-auto flex items-center justify-center border border-gray-1.00">
+              <Lock className="w-5 h-5 text-gray-400" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-gray-800">Chưa kết nối tài khoản</h4>
+              <p className="text-xs text-gray-500 mt-1">
+                Đồng bộ bảng dữ liệu chi tiêu trực tiếp sang tệp tài liệu Google Sheet của bạn qua OAuth 2.0.
+              </p>
+            </div>
+
+            <button
+              onClick={handleGoogleAuthPopup}
+              disabled={isLoading}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs"
+            >
+              {isLoading ? 'Đang kết nối...' : 'Kết nối Google Sheets 🚀'}
+            </button>
+          </div>
+        )
       ) : (
+        /* RENDER LOGGED IN SESSION DASHBOARD ACTION PANEL */
         <div className="space-y-4">
           <div className="bg-emerald-50/20 p-4 rounded-xl border border-emerald-50 relative flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-center gap-3">
-              {userProfile?.picture ? (
+            <div className="flex items-center gap-3 text-xs">
+              {syncMethod === 'appsscript' ? (
+                <div className="w-10 h-10 bg-amber-100 text-amber-700 rounded-full flex items-center justify-center font-bold text-sm border border-amber-300">
+                  🔑
+                </div>
+              ) : userProfile?.picture ? (
                 <img
                   src={userProfile.picture}
                   alt="Avatar"
@@ -366,13 +604,15 @@ export default function SheetsSync({
                 </div>
               )}
               <div>
-                <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
-                  Đã kết nối
+                <span className={`text-[10px] font-bold uppercase tracking-wider block ${syncMethod === 'appsscript' ? 'text-amber-700' : 'text-emerald-700'}`}>
+                  {syncMethod === 'appsscript' ? 'Kết nối Ổn định vĩnh viễn' : 'OAuth Đã kết nối'}
                 </span>
-                <h4 className="text-sm font-semibold text-gray-900 leading-tight">
-                  {userProfile?.name || 'Tài khoản Google'}
+                <h4 className="text-sm font-bold text-gray-900 leading-tight">
+                  {syncMethod === 'appsscript' ? 'Apps Script Web App' : (userProfile?.name || 'Tài khoản Google')}
                 </h4>
-                <p className="text-xs text-gray-500 font-medium font-mono">{userProfile?.email}</p>
+                <p className="text-[11px] text-gray-400 font-medium font-mono truncate max-w-[200px]">
+                  {syncMethod === 'appsscript' ? `${scriptUrl.substring(0, 48)}...` : userProfile?.email}
+                </p>
               </div>
             </div>
 
@@ -517,6 +757,8 @@ export default function SheetsSync({
                             : key === 'category' ? 'Danh mục'
                             : key === 'wallet_from' ? 'Tiền đi 🔴'
                             : key === 'wallet_to' ? 'Tiền đến 🟢'
+                            : key === 'startDate' ? 'Tiết kiệm: Ngày BĐ'
+                            : key === 'endDate' ? 'Tiết kiệm: Ngày ĐH'
                             : key;
                 return (
                   <div key={key}>
@@ -542,10 +784,10 @@ export default function SheetsSync({
           <form onSubmit={handleManualTokenSubmit} className="border-t border-gray-150 pt-3 space-y-2">
             <div>
               <span className="block text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1">
-                Lối tắt: Dùng Access Token trực tiếp (Khuyên dùng khi lỗi 401: invalid_client)
+                Lối tắt: Dùng Access Token trực tiếp
               </span>
               <p className="text-[10px] text-gray-400 leading-normal mb-2 font-medium">
-                ⚠️ Nếu bạn gặp lỗi <strong className="text-amber-700">Lỗi 401: invalid_client</strong> khi nhấn kết nối hoặc không có Client ID riêng, hãy sử dụng lối tắt này. Rất nhanh và không cần cấu hình phức tạp:
+                ⚠️ Dành cho nhà phát triển kiểm thử nhanh qua Google Playroom:
                 <br />
                 Mở <a
                   href="https://developers.google.com/oauthplayground"
@@ -554,7 +796,7 @@ export default function SheetsSync({
                   className="text-emerald-600 hover:underline font-bold"
                 >
                   OAuth Playground
-                </a>, nhập scope <code className="bg-gray-100 px-1 py-0.5 rounded text-[9px] font-mono text-gray-700">https://www.googleapis.com/auth/spreadsheets</code> ở danh sách bên trái, nhấp <strong>Authorize APIs</strong> và cấp quyền, sau đó dán mã Access Token nhận được vào đây.
+                </a>, lập scope <code className="bg-gray-100 px-1 py-0.5 rounded text-[9px] font-mono text-gray-700 font-bold">https://www.googleapis.com/auth/spreadsheets</code>
               </p>
               <div className="flex gap-2">
                 <input

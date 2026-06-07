@@ -91,7 +91,9 @@ const DEFAULT_CONFIG: SheetConfig = {
     currency: 'E',
     category: 'F',
     wallet_from: 'G',
-    wallet_to: 'H'
+    wallet_to: 'H',
+    startDate: 'I',
+    endDate: 'J'
   },
   hasHeaders: true,
   transactionStartRow: 6,
@@ -208,7 +210,12 @@ export default function App() {
     saveTransactions(nextList);
 
     // If autoSync is enabled and connected, append to Google Sheets immediately
-    if (config.autoSync && accessToken) {
+    const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+    const isAppsScript = syncMethod === 'appsscript';
+    const hasAppsScriptActive = isAppsScript && !!localStorage.getItem('gs_appsscript_url') && !!localStorage.getItem('gs_appsscript_key');
+    const isSyncActive = hasAppsScriptActive || (syncMethod === 'oauth' && !!accessToken);
+
+    if (config.autoSync && isSyncActive) {
       try {
         const res = await appendTransactionsToSheet(accessToken, config, [fresh]);
         if (res.success) {
@@ -227,8 +234,12 @@ export default function App() {
   };
 
   const handleTwoWaySync = async (localList: Transaction[] = transactions): Promise<Transaction[]> => {
-    if (!accessToken || !config.spreadsheetId) {
-      throw new Error('Vui lòng kết nối tài khoản Google trước.');
+    const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+    const isAppsScript = syncMethod === 'appsscript';
+    const hasAppsScriptActive = isAppsScript && !!localStorage.getItem('gs_appsscript_url') && !!localStorage.getItem('gs_appsscript_key');
+
+    if (!hasAppsScriptActive && (!accessToken || !config.spreadsheetId)) {
+      throw new Error('Vui lòng kết nối tài khoản Google hoặc cài đặt Apps Script trước.');
     }
 
     // Overwrite sheet with the current robust local list directly!
@@ -256,7 +267,12 @@ export default function App() {
     saveTransactions(nextList);
 
     // Auto-sync deletion if enabled
-    if (config.autoSync && accessToken) {
+    const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+    const isAppsScript = syncMethod === 'appsscript';
+    const hasAppsScriptActive = isAppsScript && !!localStorage.getItem('gs_appsscript_url') && !!localStorage.getItem('gs_appsscript_key');
+    const isSyncActive = hasAppsScriptActive || (syncMethod === 'oauth' && !!accessToken);
+
+    if (config.autoSync && isSyncActive) {
       try {
         setPullInfo('Đang tự động xóa và đồng bộ hai chiều cùng Google Sheets...');
         await handleTwoWaySync(nextList);
@@ -280,7 +296,12 @@ export default function App() {
     saveTransactions(nextList);
 
     // Auto-sync edit if enabled and connected
-    if (config.autoSync && accessToken) {
+    const syncMethod = localStorage.getItem('gs_sync_method') || 'oauth';
+    const isAppsScript = syncMethod === 'appsscript';
+    const hasAppsScriptActive = isAppsScript && !!localStorage.getItem('gs_appsscript_url') && !!localStorage.getItem('gs_appsscript_key');
+    const isSyncActive = hasAppsScriptActive || (syncMethod === 'oauth' && !!accessToken);
+
+    if (config.autoSync && isSyncActive) {
       try {
         setPullInfo('Đang đồng bộ giao dịch được chỉnh sửa và đồng bộ hai chiều...');
         await handleTwoWaySync(nextList);
@@ -387,7 +408,12 @@ export default function App() {
           {/* LEFT PANEL: Log entry form (span-4) */}
           <div className="lg:col-span-4 space-y-6">
             <TransactionForm onAddTransaction={handleAddTransaction} />
-            <SavingsManager />
+            <SavingsManager
+              transactions={transactions}
+              onAddTransaction={handleAddTransaction}
+              onDeleteTransaction={handleDeleteTransaction}
+              onEditTransaction={handleEditTransaction}
+            />
             <SheetsSync
               config={config}
               onChangeConfig={handleChangeConfig}

@@ -14,6 +14,8 @@ export interface Transaction {
   wallet: string;
   synced: boolean;
   rawDateTime?: string; // Original, untampered Google Sheets date/time value (keeps formatting intact)
+  startDate?: string;   // Column I: Ngày bắt đầu (YYYY-MM-DD or raw format)
+  endDate?: string;     // Column J: Ngày kết thúc (YYYY-MM-DD or raw format)
 }
 
 export interface SheetConfig {
@@ -29,6 +31,8 @@ export interface SheetConfig {
     category: string;   // e.g., "F"
     wallet_from: string; // e.g., "G" (Tiền đi)
     wallet_to: string;   // e.g., "H" (Tiền đến)
+    startDate: string;  // e.g., "I" (Ngày bắt đầu)
+    endDate: string;    // e.g., "J" (Ngày kết thúc)
   };
   hasHeaders: boolean;
   transactionStartRow?: number; // Row index where transacton records start (e.g., 6)
